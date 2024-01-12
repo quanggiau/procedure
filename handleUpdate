@@ -1,0 +1,20 @@
+	set  autocommit = 0;
+	IF nhanvien_id < 10 THEN
+        SET nhanvien_name = 'Smith';
+        START TRANSACTION;
+        insert into db_example.content(id, answer, id_service, question) value (587, "dd", 009, "cccc");
+        -- SELECT a FROM content; -- This will cause an error
+        COMMIT;
+    ELSE
+        SET nhanvien_name = 'Giau';
+    END IF;
+
+    -- Turn on autocommit after the transaction
+    SET autocommit = 1;
+    
+    -- Reset autocommit to the default setting
+    SET autocommit = @@global.autocommit;
+
+
+// giải quyết vấn đề, có handle nhung vẫn commit trong mysql
+// => bỏ cơ chế tự commit trong mysql
