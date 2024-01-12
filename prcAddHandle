@@ -1,0 +1,529 @@
+DELIMITER //
+CREATE DEFINER=`wms_user`@`%` PROCEDURE `FPMK0150_PRC_REGISMAIN`(
+    IN `pActnId` VARCHAR(16),
+    IN `pCstmCd` VARCHAR(8),
+    IN `pBrnchCd` VARCHAR(6),
+    IN `pPrcsOrdNo` VARCHAR(16),
+    IN `pPrcsRsltNo` VARCHAR(16),
+    IN `pSmngNo` VARCHAR(16),
+    IN `pUsrCd` VARCHAR(8),
+    IN `pPrgId` VARCHAR(10),
+    IN `pSampleFlg` VARCHAR(1),
+    IN `pPrcsRsltDate` VARCHAR(10),
+    IN `pSiRsltDate` VARCHAR(10),
+    IN `pUpdDateTime` VARCHAR(20),
+    
+    OUT `pAllwQty` INT(9),
+    OUT `pRet` INT,
+    OUT `pLossFlg` INT(1),
+    OUT `pErrMsg` VARCHAR(1000),
+    OUT `pErrPrcNm` VARCHAR(1000),
+    OUT `pSql` VARCHAR(1000))
+MainAction:BEGIN
+    DECLARE done INT DEFAULT FALSE;
+
+    DECLARE _fnshItemCCd VARCHAR(25);
+    DECLARE _maSoordNo VARCHAR(16);
+    DECLARE _cmpntSoordNo VARCHAR(16);
+    DECLARE _pcsOfPKkg INT(6);
+    DECLARE _prcsDtlNo INT(3);
+    DECLARE _fnshOrdQty INT(9);
+    DECLARE _fnshInputQty INT(9);
+    DECLARE _fnshRemainQty INT(9);
+    DECLARE _lctnCd VARCHAR(16);
+    DECLARE _prcsDtlRemark VARCHAR(256);
+
+    DECLARE _cur_TWK350 CURSOR FOR
+    SELECT
+        TWK350.FNSHITEMCCD,
+        TWK350.MASOORDNO,
+        TWK350.CMPNTSOORDNO,
+        TWK350.PCSOFPKG,
+        TWK350.PRCSDTLNO,
+        TWK350.FNSHORDQTY,
+        TWK350.FNSHINPUTQTY,
+        TWK350.FNSHREMAINQTY,
+        TWK350.LCTNCD,
+        TWK350.PRCSDTLREMARK
+    FROM
+        TWK350_PRCSRSLTDTL AS TWK350
+    WHERE
+        TWK350.CSTMCD = pCstmCd
+    AND TWK350.BRNCHCD = pBrnchCd
+    AND TWK350.ACTNID = pActnId
+    AND TWK350.PRCSORDNO = pPrcsOrdNo;
+
+    DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
+    DECLARE exit handler for SQLWARNING
+    BEGIN
+        GET DIAGNOSTICS CONDITION 1
+        @p1 = RETURNED_SQLSTATE, @p2 = MESSAGE_TEXT;
+        SELECT @p1 as RETURNED_SQLSTATE  , @p2 as MESSAGE_TEXT;
+        SET pret = 98, pErrMsg=@p2, pErrPrcNm = 'FPMK0150_PRC_REGISMAIN';
+        ROLLBACK;
+    END;  
+    DECLARE exit handler for sqlexception
+    BEGIN
+        GET DIAGNOSTICS CONDITION 1
+        @p1 = RETURNED_SQLSTATE, @p2 = MESSAGE_TEXT;
+        SELECT @p1 as RETURNED_SQLSTATE  , @p2 as MESSAGE_TEXT;
+        SET pret = 99, pErrMsg = @p2, pErrPrcNm = 'FPMK0150_PRC_REGISMAIN';
+        ROLLBACK;
+    END;
+
+    SET pRet = 0;
+    BEGIN
+        -- STEP 1: Check lỗi xung đột TMK010_STS
+        SELECT
+            UPDDATETIME INTO @updDateTime
+        FROM TMK010_STS
+        WHERE
+            CSTMCD = pCstmCd
+        AND BRNCHCD = pBrnchCd
+        AND PRCSORDNO = pPrcsOrdNo
+        FOR UPDATE;
+
+        IF @updDateTime <> pUpdDateTime THEN
+            SET pret=97, pErrMsg = 'This data has been updated by another process!', pErrPrcNm = 'FPMK0150_PRC_EXECPRCHED';
+            ROLLBACK;
+            LEAVE MainAction;
+        END IF;
+
+        IF pRet <> 0 THEN
+            ROLLBACK;
+            LEAVE MainAction;
+        END IF;
+        
+        OPEN _cur_TWK350;
+        read_loop: LOOP
+        FETCH _cur_TWK350
+        INTO 
+            _fnshItemCCd,
+            _maSoordNo,
+            _cmpntSoordNo,
+            _pcsOfPKkg,
+            _prcsDtlNo,
+            _fnshOrdQty,
+            _fnshInputQty,
+            _fnshRemainQty,
+            _lctnCd,
+            _prcsDtlRemark;
+
+        IF done THEN
+            LEAVE read_loop;
+        END IF;
+
+        -- Init các variable sử dụng trong vòng lặp
+        SET @cntFinished = 0;
+        SET @pkgOfCase = 0;
+        SET @fnshItemCd = '';
+
+        -- Step 2: Gọi thủ tục cập nhập lại ALLWQTY sau khi nhập kết quả gia công
+        CALL FPMK0150_PRC_EXECREALPROVPRCS(
+                                            pActnId,
+                                            pCstmCd,
+                                            pBrnchCd,
+                                            pPrcsOrdNo,
+                                            pPrcsRsltNo,
+                                            _cmpntSoordNo,
+                                            _maSoordNo,
+                                            _prcsDtlNo,
+                                            pSmngNo,
+                                            _fnshRemainQty,
+                                            _fnshInputQty,
+                                            pUsrCd,
+                                            pPrgId,
+                                            pSampleFlg,
+
+                                            -- Out Parameter
+                                            pAllwQty,
+                                            pLossFlg,
+                                            pRet,
+                                            pErrMsg,
+                                            pErrPrcNm,
+                                            pSql);
+                                            
+		IF pRet <> 0 THEN
+            ROLLBACK;
+            LEAVE MainAction;
+        END IF;
+
+        -- Step 3: Đăng ký dữ liệu vào Bảng chi tiết NO.A và Nguyên Phụ Liệu cần
+        INSERT INTO TMK132_PRCSRSLTCMPNT (CSTMCD , BRNCHCD , PRCSRSLTNO , PRCSORDNO , PRCSCSTMNO , PRCSDTLNO , PRCSDTLPKGNO , PRCSCMPNTNO , CMPNTITEMTYPE , CMPNTITEMCD , CMPNTITEMNM , CMPNTITEMCONTENT , CMPNTITEMUNITNM , CMPNTQLTYCD , CMPNTPRODDATE , CMPNTPRODDATECNDCD , CMPNTLIMITDATE , CMPNTLIMITDATECNDCD , CMPNTSTCKMNGKEY1 , CMPNTSTCKMNGKEYCNDCD1 , CMPNTSTCKMNGKEY2 , CMPNTSTCKMNGKEYCNDCD2 , CMPNTSTCKMNGKEY3 , CMPNTSTCKMNGKEYCNDCD3 , FNSHORDQTY , FNSHRSLTQTY , PCSOFPKG , CMPNTORDQTY , CMPNTRSLTQTY , CMPNTPRICE , CMPNTNETVALUE , CMPNTFEEVALUE , CMPNTSHIPVALUE , CMPNTTTLVALUE , PRCSCMPNTREMARK , SMNGNO , STRRSRV1 , STRRSRV2 , STRRSRV3 , STRRSRV4 , STRRSRV5 , STRRSRV6 , STRRSRV7 , STRRSRV8 , STRRSRV9 , STRRSRV10 , ENTUSRCD , ENTDATETIME , ENTPRG , UPDUSRCD , UPDDATETIME , UPDPRG)
+        SELECT TMK130.CSTMCD ,
+            TMK130.BRNCHCD ,
+            pPrcsRsltNo ,
+            TMK130.PRCSORDNO ,
+            TMK130.PRCSCSTMNO ,
+            _prcsDtlNo ,
+            _prcsDtlNo ,
+            TMK130.PRCSCMPNTNO ,
+            TMK130.CMPNTITEMTYPE ,
+            TMK130.CMPNTITEMCD ,
+            CONCAT(TMT092.ITEMNM, '-P-', TMK130.PCSOFPKG) ,
+            TMT092.FIBERCONTENT ,
+            TMK130.CMPNTITEMUNITNM ,
+            TMK130.CMPNTQLTYCD ,
+            TMK130.CMPNTPRODDATE ,
+            TMK130.CMPNTPRODDATECNDCD ,
+            TMK130.CMPNTLIMITDATE ,
+            TMK130.CMPNTLIMITDATECNDCD ,
+            TMK130.CMPNTSTCKMNGKEY1 ,
+            TMK130.CMPNTSTCKMNGKEYCNDCD1 ,
+            TMK130.CMPNTSTCKMNGKEY2 ,
+            TMK130.CMPNTSTCKMNGKEYCNDCD2 ,
+            TMK130.CMPNTSTCKMNGKEY3 ,
+            TMK130.CMPNTSTCKMNGKEYCNDCD3 ,
+            TMK130.FNSHORDQTY ,
+            _fnshInputQty ,
+            TMK130.PCSOFPKG ,
+            TMK130.CMPNTORDQTY ,
+            (TMK130.CMPNTORDQTY/TMK130.FNSHORDQTY) * _fnshInputQty ,
+            TMT092.ITEMPRICE ,
+            TMK130.CMPNTNETVALUE ,
+            TMK130.CMPNTFEEVALUE ,
+            TMK130.CMPNTSHIPVALUE ,
+            TMK130.CMPNTTTLVALUE ,
+            TMK130.PRCSCMPNTREMARK ,
+            pSmngNo ,
+            TMK130.STRRSRV1 ,
+            TMK130.STRRSRV2 ,
+            TMK130.STRRSRV3 ,
+            TMK130.STRRSRV4 ,
+            TMK130.STRRSRV5 ,
+            TMK130.STRRSRV6 ,
+            TMK130.STRRSRV7 ,
+            TMK130.STRRSRV8 ,
+            TMK130.STRRSRV9 ,
+            TOT060.MAUCHU ,
+            pUsrCd,
+            SYSDATE(6),
+            pPrgId,
+            pUsrCd,
+            SYSDATE(6),
+            pPrgId
+        FROM
+        (SELECT CSTMCD ,
+                BRNCHCD ,
+                PRCSORDNO ,
+                PRCSCSTMNO ,
+                PRCSDTLNO ,
+                PRCSCMPNTNO ,
+                CMPNTITEMTYPE ,
+                CMPNTITEMCD ,
+                CMPNTITEMNM ,
+                CMPNTITEMUNITNM ,
+                CMPNTQLTYCD ,
+                CMPNTPRODDATE ,
+                CMPNTPRODDATECNDCD ,
+                CMPNTLIMITDATE ,
+                CMPNTLIMITDATECNDCD ,
+                CMPNTSTCKMNGKEY1 ,
+                CMPNTSTCKMNGKEYCNDCD1 ,
+                CMPNTSTCKMNGKEY2 ,
+                CMPNTSTCKMNGKEYCNDCD2 ,
+                CMPNTSTCKMNGKEY3 ,
+                CMPNTSTCKMNGKEYCNDCD3 ,
+                FNSHORDQTY ,
+                PCSOFPKG ,
+                CMPNTORDQTY ,
+                CMPNTPRICE ,
+                CMPNTNETVALUE ,
+                CMPNTFEEVALUE ,
+                CMPNTSHIPVALUE ,
+                CMPNTTTLVALUE ,
+                PRCSCMPNTREMARK ,
+                STRRSRV1 ,
+                STRRSRV2 ,
+                STRRSRV3 ,
+                STRRSRV4 ,
+                STRRSRV5 ,
+                STRRSRV6 ,
+                STRRSRV7 ,
+                STRRSRV8 ,
+                STRRSRV9 ,
+                STRRSRV10
+        FROM TMK130_PRCSORDCMPNT
+        WHERE CSTMCD = pCstmCd
+            AND BRNCHCD = pBrnchCd
+            AND PRCSORDNO = pPrcsOrdNo
+            AND PRCSDTLNO = _prcsDtlNo ) AS TMK130
+        LEFT JOIN
+        (SELECT CSTMCD,
+                BRNCHCD,
+                ITEMCD,
+                STCKMNGKEY1,
+                STCKMNGKEY2,
+                MAX(STRRSRV10) AS MAUCHU
+        FROM tot060_pickord
+        WHERE CSTMCD = pCstmCd
+            AND BRNCHCD = pBrnchCd
+            AND (SOORDNO = _cmpntSoOrdNo
+                OR SOORDNO = _maSoordNo)
+        GROUP BY ITEMCD,
+                    STCKMNGKEY1,
+                    STCKMNGKEY2) AS TOT060 ON TMK130.CSTMCD=TOT060.CSTMCD
+        AND TMK130.CMPNTITEMCD=TOT060.ITEMCD
+        AND IFNULL(TRIM(TMK130.CMPNTSTCKMNGKEY1), '')=IFNULL(TRIM(TOT060.STCKMNGKEY1), '')
+        AND IFNULL(TRIM(TMK130.CMPNTSTCKMNGKEY2), '')=IFNULL(TRIM(TOT060.STCKMNGKEY2), '')
+        LEFT JOIN
+        (SELECT CSTMCD,
+                ITEMCD,
+                MAX(ITEMNM) AS ITEMNM,
+                STCKMNGKEY1,
+                STCKMNGKEY2,
+                MAX(ITEMPRICE) AS ITEMPRICE,
+                MAX(FIBERCONTENT) AS FIBERCONTENT
+        FROM tmt092_itemprice
+        WHERE CSTMCD = pCstmCd
+        GROUP BY CSTMCD,
+                    ITEMCD,
+                    STCKMNGKEY1,
+                    STCKMNGKEY2) AS TMT092 ON TMK130.CSTMCD=TMT092.CSTMCD
+        AND TMK130.CMPNTITEMCD=TMT092.ITEMCD
+        AND IFNULL(TRIM(TMK130.CMPNTSTCKMNGKEY1), '')=IFNULL(TRIM(TMT092.STCKMNGKEY1), '')
+        AND IFNULL(TRIM(TMK130.CMPNTSTCKMNGKEY2), '')=IFNULL(TRIM(TMT092.STCKMNGKEY2), '');
+
+        -- Step 4: Đăng ký dữ liệu vào Bảng chi tiết kết quả gia công
+        INSERT INTO TMK121_PRCSRSLTDTL (CSTMCD, BRNCHCD, PRCSORDNO, SMNGNO, PRCSRSLTNO, PRCSDTLNO, PRCSDTLPKGNO, PRCSCSTMNO, FNSHITEMCD, FNSHITEMCCD, FNSHITEMNM, FNSHQLTYCD, FNSHPRODDATE, FNSHPRODDATECNDCD, FNSHLIMITDATE, FNSHLIMITDATECNDCD, FNSHSTCKMNGKEY1, FNSHSTCKMNGKEYCNDCD1, FNSHSTCKMNGKEY2, FNSHSTCKMNGKEYCNDCD2, FNSHSTCKMNGKEY3, FNSHSTCKMNGKEYCNDCD3, PCSOFPKG, FNSHORDQTY, FNSHRSLTQTY, SAMPLEFLG, LCTNCD, REMARK, STRRSRV1, STRRSRV2, STRRSRV3, STRRSRV4, STRRSRV5, STRRSRV6, STRRSRV7, STRRSRV8, STRRSRV9, STRRSRV10, ENTUSRCD, ENTDATETIME, ENTPRG, UPDUSRCD, UPDDATETIME, UPDPRG)
+        SELECT
+            pCstmCd,
+            pBrnchCd,
+            pPrcsOrdNo,
+            pSmngNo,
+            pPrcsRsltNo,
+            _prcsDtlNo,
+            _prcsDtlNo,
+            TMK110.PRCSCSTMNO,
+            TMK120.FNSHITEMCD,
+            _fnshItemCCd,
+            TMT090.ITEMNM,
+            TMK120.FNSHQLTYCD,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            TMK120.FNSHSTCKMNGKEY1,
+            TMK120.FNSHSTCKMNGKEYCNDCD1,
+            TMK120.FNSHSTCKMNGKEY2,
+            TMK120.FNSHSTCKMNGKEYCNDCD2,
+            NULL,
+            NULL,
+            _pcsOfPKkg,
+            _fnshOrdQty,
+            _fnshInputQty,
+            pSampleFlg,
+            _lctnCd,
+            _prcsDtlRemark,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            pUsrCd,
+            SYSDATE(6),
+            pPrgId,
+            pUsrCd,
+            SYSDATE(6),
+            pPrgId
+        FROM
+            tmk120_prcsorddtl AS TMK120
+        INNER JOIN
+            tmk110_prcsordhed AS TMK110
+        ON
+            TMK120.CSTMCD = TMK110.CSTMCD
+        AND TMK120.BRNCHCD = TMK110.BRNCHCD
+        AND TMK120.PRCSORDNO = TMK110.PRCSORDNO
+        LEFT JOIN
+            tmt090_item AS TMT090
+        ON
+            TMK120.CSTMCD = TMT090.CSTMCD
+        AND TMK120.FNSHITEMCD = TMT090.ITEMCD
+        WHERE
+            TMK120.CSTMCD = pCstmCd
+        AND TMK120.BRNCHCD = pBrnchCd
+        AND TMK120.PRCSORDNO = pPrcsOrdNo
+        AND TMK120.PRCSDTLNO = _prcsDtlNo;
+
+        -- Step 5: Cập nhập lại số lượng thành phẩm đã hoàn thành. Update TMK120_PRCSORDDTL
+        UPDATE
+            TMK120_PRCSORDDTL
+        SET
+            FNSHREMAINQTY = (CASE
+                            WHEN (_fnshRemainQty - _fnshInputQty) < 0 THEN 0
+                            ELSE _fnshRemainQty - _fnshInputQty
+                            END)
+        , FNSHRSLTQTY = FNSHRSLTQTY + _fnshInputQty
+        , UPDUSRCD = pUsrCd
+        , UPDDATETIME = SYSDATE(6) 
+        , UPDPRG = pPrgId
+        WHERE
+            CSTMCD = pCstmCd
+        AND BRNCHCD = pBrnchCd
+        AND PRCSORDNO = pPrcsOrdNo
+        AND PRCSDTLNO = _prcsDtlNo;
+
+        -- Step 6: Cập nhập PKGOFCASE trong TMT090_ITEM
+        SELECT
+            PKGOFCASE, FNSHITEMCD INTO @pkgOfCase, @fnshItemCd
+        FROM
+            TMK120_PRCSORDDTL
+        WHERE
+            CSTMCD = pCstmCd
+        AND BRNCHCD = pBrnchCd
+        AND PRCSORDNO = pPrcsOrdNo
+        AND PRCSDTLNO = _prcsDtlNo;
+
+        IF (@pkgOfCase <> 0 OR @pkgOfCase IS NOT NULL) THEN
+            UPDATE
+                TMT090_ITEM
+            SET 
+                QTYOFCASE = @pkgOfCase ,
+                UPDUSRCD = pUsrCd ,
+                UPDDATETIME = SYSDATE(6) ,
+                UPDPRG = pPrgId
+            WHERE 
+                CSTMCD = pCstmCd
+            AND ITEMCD = @fnshItemCd;
+        END IF;
+
+        END LOOP;
+        CLOSE _cur_TWK350;
+
+        -- STEP 7: Đăng ký dữ liệu vào Bảng thông tin kết quả gia công
+        INSERT INTO TMK111_PRCSRSLTHED (CSTMCD, BRNCHCD, PRCSORDNO, PRCSORDNB, SMNGNO, PRCSRSLTNO, PRCSCSTMNO, PRCSORDKBN, PRCSORDTYPE, PRCSSHIPTODC, BUYERCD, BUYERNMENC, SPPLYCD, PRCSRSLTDATE, PRCSFNSHDATE, PRCSRSLTREMARK, SIPLNNO, STRRSRV1, STRRSRV2, STRRSRV3, STRRSRV4, STRRSRV5, STRRSRV6, STRRSRV7, STRRSRV8, STRRSRV9, STRRSRV10, TSAPPDATE, TSAUDATE, TSINDATE, HBAPPDATE, HBAUDATE, HBINDATE, ENTUSRCD, ENTDATETIME, ENTPRG, UPDUSRCD, UPDDATETIME, UPDPRG)
+        SELECT
+            pCstmCd,
+            pBrnchCd,
+            pPrcsOrdNo,
+            TMK110.PRCSORDNB,
+            pSmngNo,
+            pPrcsRsltNo,
+            TMK110.PRCSCSTMNO,
+            TMK110.PRCSORDKBN,
+            TMK110.PRCSORDTYPE,
+            TMK110.PRCSSHIPTODC,
+            TMK110.BUYERCD,
+            TMK110.BUYERNMENC,
+            TMK110.SPPLYCD,
+            pPrcsRsltDate,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            pSiRsltDate,
+            pSiRsltDate,
+            pSiRsltDate,
+            pSiRsltDate,
+            pSiRsltDate,
+            pSiRsltDate,
+            pUsrCd,
+            SYSDATE(6),
+            pPrgId,
+            pUsrCd,
+            SYSDATE(6),
+            pPrgId
+        FROM
+            tmk110_prcsordhed AS TMK110
+        WHERE
+            TMK110.CSTMCD = pCstmCd
+        AND TMK110.BRNCHCD = pBrnchCd
+        AND TMK110.PRCSORDNO = pPrcsOrdNo;
+
+        -- Step 8: Check finished
+        SELECT SUM(IF((IFNULL(TMK120.FNSHORDQTY, 0) + IFNULL(TMK120.FNSHSAMPLEQTY, 0) - IFNULL(TMK121.FNSHRSLTQTY, 0)) <= 0, 0, 1)) AS CNT INTO @cntFinished
+        FROM
+        (SELECT TMK120.CSTMCD,
+                TMK120.BRNCHCD,
+                TMK120.PRCSORDNO,
+                TMK120.PRCSDTLNO,
+                SUM(IFNULL(TMK120.FNSHORDQTY, 0)) AS FNSHORDQTY,
+                SUM(IFNULL(TMK120.FNSHSAMPLEQTY, 0)) AS FNSHSAMPLEQTY
+        FROM
+            tmk120_prcsorddtl TMK120
+        WHERE
+            TMK120.CSTMCD = pCstmCd
+        AND TMK120.BRNCHCD = pBrnchCd
+        AND TMK120.PRCSORDNO = pPrcsOrdNo
+        GROUP BY
+            TMK120.CSTMCD,
+            TMK120.BRNCHCD,
+            TMK120.PRCSORDNO,
+            TMK120.PRCSDTLNO) TMK120
+        LEFT JOIN
+        (SELECT TMK121.CSTMCD,
+                TMK121.BRNCHCD,
+                TMK121.PRCSORDNO,
+                TMK121.PRCSDTLNO,
+                SUM(IFNULL(TMK121.FNSHRSLTQTY, 0)) AS FNSHRSLTQTY
+        FROM
+            tmk121_prcsrsltdtl TMK121
+        WHERE
+            TMK121.CSTMCD = pCstmCd
+        AND TMK121.BRNCHCD = pBrnchCd
+        AND TMK121.PRCSORDNO = pPrcsOrdNo
+        GROUP BY
+            TMK121.CSTMCD,
+            TMK121.BRNCHCD,
+            TMK121.PRCSORDNO,
+            TMK121.PRCSDTLNO) TMK121
+        ON TMK120.CSTMCD = TMK121.CSTMCD
+        AND TMK120.BRNCHCD = TMK121.BRNCHCD
+        AND TMK120.PRCSORDNO = TMK121.PRCSORDNO
+        AND TMK120.PRCSDTLNO = TMK121.PRCSDTLNO
+        WHERE
+            TMK120.CSTMCD = pCstmCd
+        AND TMK120.BRNCHCD = pBrnchCd
+        AND TMK120.PRCSORDNO = pPrcsOrdNo
+        GROUP BY
+            TMK120.CSTMCD,
+            TMK120.BRNCHCD,
+            TMK120.PRCSORDNO;
+
+        -- Step 9: Sau khi xử lý xong dữ liệu chi tiết, Cập nhập trạng thái cho chỉ thị gia công
+        UPDATE
+            TMK010_STS
+        SET 
+            RSLTCOMPFLG = (CASE
+                            WHEN @cntFinished > 0 THEN '2'
+                            ELSE '1'
+                           END) ,
+            UPDUSRCD = pUsrCd ,
+            UPDDATETIME = SYSDATE(6) ,
+            UPDPRG = pPrgId
+        WHERE
+            CSTMCD = pCstmCd
+        AND BRNCHCD = pBrnchCd
+        AND PRCSORDNO = pPrcsOrdNo;
+
+        -- Step 10: Cập nhập lại thông tin Bảng thông tin đặt hàng gia công
+        UPDATE
+            TMK110_PRCSORDHED
+        SET
+            UPDUSRCD = pUsrCd ,
+            UPDDATETIME = SYSDATE(6) ,
+            UPDPRG = pPrgId
+        WHERE
+            CSTMCD = pCstmCd
+        AND BRNCHCD = pBrnchCd
+        AND PRCSORDNO = pPrcsOrdNo;
+
+        COMMIT;
+    END;
+END //
+
+DELIMITER ;
